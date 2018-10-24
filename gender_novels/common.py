@@ -1,24 +1,113 @@
+import gzip
 import os
+import pickle
 import urllib.request
 
 from pathlib import Path
 import codecs
 
+import seaborn as sns
+
 DEBUG = False
 
 BASE_PATH = Path(os.path.abspath(os.path.dirname(__file__)))
-GUTENBERG_METADATA_PATH = Path('corpora', 'gutenberg', 'gutenberg.csv')
 METADATA_LIST = ['gutenberg_id', 'author', 'date', 'title', 'country_publication', 'author_gender',
                  'subject', 'corpus_name', 'notes']
-
-# 30 books from gutenberg downloaded from Dropbox folder shared with Keith,
+# books from gutenberg downloaded from Dropbox folder shared by Keith
 INITIAL_BOOK_STORE = r'corpora/test_books_30'
-# plus some extras
-FINAL_BOOK_STORE = r'test_corpus'
-AUTHOR_NAME_REGEX = r"(?P<last_name>(\w+ )*\w*)\, (?P<first_name>(\w+\.* )*(\w\.*)*)"
-outputDir = 'converted'
+#TODO: change to actual directory when generating corpus
 
-# TODO(elsa): Investigate doctest errors in this file, may be a result of my own system, not actual code errors
+# plus some extras
+AUTHOR_NAME_REGEX = r"(?P<last_name>(\w+ )*\w*)\, (?P<first_name>(\w+\.* )*(\w\.*)*)(?P<suffix>\, \w+\.)*(\((?P<real_name>(\w+ )*\w*)\))*"
+outputDir = 'converted'
+TEXT_START_MARKERS = frozenset((
+    "*END*THE SMALL PRINT",
+    "*** START OF THE PROJECT GUTENBERG",
+    "*** START OF THIS PROJECT GUTENBERG",
+    "This etext was prepared by",
+    "E-text prepared by",
+    "Produced by",
+    "Distributed Proofreading Team",
+    "Proofreading Team at http://www.pgdp.net",
+    "http://gallica.bnf.fr)",
+    "      http://archive.org/details/",
+    "http://www.pgdp.net",
+    "by The Internet Archive)",
+    "by The Internet Archive/Canadian Libraries",
+    "by The Internet Archive/American Libraries",
+    "public domain material from the Internet Archive",
+    "Internet Archive)",
+    "Internet Archive/Canadian Libraries",
+    "Internet Archive/American Libraries",
+    "material from the Google Print project",
+    "*END THE SMALL PRINT",
+    "***START OF THE PROJECT GUTENBERG",
+    "This etext was produced by",
+    "*** START OF THE COPYRIGHTED",
+    "The Project Gutenberg",
+    "http://gutenberg.spiegel.de/ erreichbar.",
+    "Project Runeberg publishes",
+    "Beginning of this Project Gutenberg",
+    "Project Gutenberg Online Distributed",
+    "Gutenberg Online Distributed",
+    "the Project Gutenberg Online Distributed",
+    "Project Gutenberg TEI",
+    "This eBook was prepared by",
+    "http://gutenberg2000.de erreichbar.",
+    "This Etext was prepared by",
+    "This Project Gutenberg Etext was prepared by",
+    "Gutenberg Distributed Proofreaders",
+    "Project Gutenberg Distributed Proofreaders",
+    "the Project Gutenberg Online Distributed Proofreading Team",
+    "**The Project Gutenberg",
+    "*SMALL PRINT!",
+    "More information about this book is at the top of this file.",
+    "tells you about restrictions in how the file may be used.",
+    "l'authorization à les utilizer pour preparer ce texte.",
+    "of the etext through OCR.",
+    "*****These eBooks Were Prepared By Thousands of Volunteers!*****",
+    "We need your donations more than ever!",
+    " *** START OF THIS PROJECT GUTENBERG",
+    "****     SMALL PRINT!",
+    '["Small Print" V.',
+    '      (http://www.ibiblio.org/gutenberg/',
+    'and the Project Gutenberg Online Distributed Proofreading Team',
+    'Mary Meehan, and the Project Gutenberg Online Distributed Proofreading',
+    '                this Project Gutenberg edition.',
+))
+TEXT_END_MARKERS = frozenset((
+    "*** END OF THE PROJECT GUTENBERG",
+    "*** END OF THIS PROJECT GUTENBERG",
+    "***END OF THE PROJECT GUTENBERG",
+    "End of the Project Gutenberg",
+    "End of The Project Gutenberg",
+    "Ende dieses Project Gutenberg",
+    "by Project Gutenberg",
+    "End of Project Gutenberg",
+    "End of this Project Gutenberg",
+    "Ende dieses Projekt Gutenberg",
+    "        ***END OF THE PROJECT GUTENBERG",
+    "*** END OF THE COPYRIGHTED",
+    "End of this is COPYRIGHTED",
+    "Ende dieses Etextes ",
+    "Ende dieses Project Gutenber",
+    "Ende diese Project Gutenberg",
+    "**This is a COPYRIGHTED Project Gutenberg Etext, Details Above**",
+    "Fin de Project Gutenberg",
+    "The Project Gutenberg Etext of ",
+    "Ce document fut presente en lecture",
+    "Ce document fut présenté en lecture",
+    "More information about this book is at the top of this file.",
+    "We need your donations more than ever!",
+    "END OF PROJECT GUTENBERG",
+    " End of the Project Gutenberg",
+    " *** END OF THIS PROJECT GUTENBERG",
+))
+LEGALESE_START_MARKERS = frozenset(("<<THIS ELECTRONIC VERSION OF",))
+LEGALESE_END_MARKERS = frozenset(("SERVICE THAT CHARGES FOR DOWNLOAD",))
+
+# TODO(elsa): Investigate doctest errors in this file, may be a result of
+# my own system, not actual code errors
 
 class FileLoaderMixin:
     """ The FileLoaderMixin loads files either locally or
@@ -69,6 +158,10 @@ class FileLoaderMixin:
         >>> novel_text_str = f.load_file(novel_path_str)
         >>> novel_text == novel_text_str
         True
+        >>> novel_path2 = Path(r"corpora/test_books_30/20-0.txt")
+        >>> paradise_lost = f.load_file(novel_path2)
+        >>> paradise_lost[1:61]
+        'The Project Gutenberg EBook of Paradise Lost, by John Milton'
 
         Returns a str (txt file) or list of strs (csv file)
         """
@@ -153,6 +246,48 @@ class FileLoaderMixin:
             return text.replace('\r\n', '\n')
 
 
+def store_pickle(obj, filename):
+    """
+    Store a compressed "pickle" of the object in the "pickle_data" directory
+    and return the full path to it.
+
+    The filename should not contain a directory or suffix.
+
+    Example in lieu of Doctest to avoid writing out a file.
+
+        my_object = {'a': 4, 'b': 5, 'c': [1, 2, 3]}
+        gender_novels.common.store_pickle(my_object, 'example_pickle')
+
+    :param obj: Any Python object to be pickled
+    :param filename: str | Path
+    :return: Path
+    """
+    filename = BASE_PATH / 'pickle_data' / (str(filename) + '.pgz')
+    with gzip.GzipFile(filename, 'w') as fileout:
+        pickle.dump(obj, fileout)
+    return filename
+
+
+def load_pickle(filename):
+    """
+    Load the pickle stored at filename where filename does not contain a
+    directory or suffix.
+
+    Example in lieu of Doctest to avoid writing out a file.
+
+        my_object = gender_novels.common.load_pickle('example_pickle')
+        my_object
+        {'a': 4, 'b': 5, 'c': [1, 2, 3]}
+
+    :param filename: str | Path
+    :return: object
+    """
+    filename = BASE_PATH / 'pickle_data' / (str(filename) + '.pgz')
+    with gzip.GzipFile(filename, 'r') as filein:
+        obj = pickle.load(filein)
+    return obj
+
+
 def get_text_file_encoding(filepath):
     """
     For text file at filepath returns the text encoding as a string (e.g. 'utf-8')
@@ -176,14 +311,14 @@ def get_text_file_encoding(filepath):
     :param filepath: fstr
     :return: str
     """
-
     from chardet.universaldetector import UniversalDetector
     detector = UniversalDetector()
 
     with open(filepath, 'rb') as file:
         for line in file:
             detector.feed(line)
-            if detector.done: break
+            if detector.done:
+                break
         detector.close()
     return detector.result['encoding']
 
@@ -197,10 +332,12 @@ def convert_text_file_to_new_encoding(source_path, target_path, target_encoding)
     :param target_path: str or Path
     :param target_encoding: str
 
+    >>> from gender_novels.common import BASE_PATH
     >>> text = ' ¶¶¶¶ here is a test file'
     >>> source_path = Path(BASE_PATH, 'source_file.txt')
     >>> target_path = Path(BASE_PATH, 'target_file.txt')
-    >>> with codecs.open(source_path, 'w', 'iso-8859-1') as source: source.write(text)
+    >>> with codecs.open(source_path, 'w', 'iso-8859-1') as source:
+    ...     source.write(text)
     >>> get_text_file_encoding(source_path)
     'ISO-8859-1'
     >>> convert_text_file_to_new_encoding(source_path, target_path, target_encoding='utf-8')
@@ -213,7 +350,8 @@ def convert_text_file_to_new_encoding(source_path, target_path, target_encoding)
     :return:
     """
 
-    valid_encodings = ['utf-8', 'utf8', 'UTF-8-SIG', 'ascii', 'iso-8859-1', 'ISO-8859-1']
+    valid_encodings = ['utf-8', 'utf8', 'UTF-8-SIG', 'ascii', 'iso-8859-1', 'ISO-8859-1',
+                       'Windows-1252']
 
     # if the source_path or target_path is a string, turn to Path object.
     if isinstance(source_path, str):
@@ -240,7 +378,20 @@ def convert_text_file_to_new_encoding(source_path, target_path, target_encoding)
     with codecs.open(target_path, 'w', encoding=target_encoding) as target_file:
         target_file.write(text)
 
+def load_graph_settings(show_grid_lines=True):
+    '''
+    This function sets the seaborn graph settings to the defaults for our project.
+    Defaults to displaying gridlines. To remove gridlines, call with False.
+    :return:
+    '''
+    show_grid_lines_string = str(show_grid_lines)
+    palette = "colorblind"
+    style_name = "white"
+    style_list = {'axes.edgecolor': '.6', 'grid.color': '.9', 'axes.grid': show_grid_lines_string,
+                  'font.family': 'serif'}
+    sns.set_color_codes(palette)
+    sns.set_style(style_name, style_list)
 
 if __name__ == '__main__':
     from dh_testers.testRunner import main_test
-    main_test()
+    main_test(import_plus_relative=True)  # this allows for relative calls in the import.
